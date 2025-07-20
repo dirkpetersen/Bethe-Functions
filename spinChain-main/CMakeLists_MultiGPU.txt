@@ -1,0 +1,199 @@
+cmake_minimum_required(VERSION 3.18)  # Increased for better CUDA support
+project(libspinChainMultiGPU LANGUAGES CXX CUDA)
+
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)  # Increased for better C++ features
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Enhanced CUDA configuration
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# Set CUDA architectures (supporting more modern GPUs)
+set(CMAKE_CUDA_ARCHITECTURES "61;70;75;80;86")
+
+# Enhanced CUDA compilation flags
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_61,code=sm_61")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_70,code=sm_70")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_75,code=sm_75")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_80,code=sm_80")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_86,code=sm_86")
+
+# Enable debug information and optimizations
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0")
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -O3 -DNDEBUG")
+
+# Automatic pybind11 discovery (more robust than hardcoded paths)
+find_package(pybind11 REQUIRED HINTS ${PYBIND11_DIR})
+if(NOT pybind11_FOUND)
+    # Fallback: try to find pybind11 using python
+    execute_process(
+        COMMAND python3 -c "import pybind11; print(pybind11.get_cmake_dir())"
+        OUTPUT_VARIABLE pybind11_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    find_package(pybind11 REQUIRED PATHS ${pybind11_DIR})
+endif()
+
+# Find CUDA toolkit
+find_package(CUDAToolkit REQUIRED)
+
+# Option to enable/disable multi-GPU support
+option(ENABLE_MULTIGPU "Enable multi-GPU support" ON)
+
+# Include directories
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+include_directories(${CUDAToolkit_INCLUDE_DIRS})
+
+# Source files for original single-GPU build
+set(SINGLE_GPU_SOURCES
+    src/pybindWrapper.cpp
+    src/goldCode.cpp
+    src/gpuCode.cu
+    src/gpuControl.cu
+)
+
+# Additional source files for multi-GPU build
+set(MULTI_GPU_SOURCES
+    src/multiGPUWrapper.cpp
+    src/multiGPUMemory.cu
+    src/multiGPUControl.cu
+    src/multiGPUKernels.cu
+    src/goldCode.cpp
+    src/gpuCode.cu
+    src/gpuControl.cu
+)
+
+# Build options
+if(ENABLE_MULTIGPU)
+    message(STATUS "Building with multi-GPU support")
+    
+    # Multi-GPU Python extension
+    pybind11_add_module(libspinChainMultiGPU ${MULTI_GPU_SOURCES})
+    
+    # Link libraries for multi-GPU build
+    target_link_libraries(libspinChainMultiGPU PRIVATE
+        CUDA::cudart
+        CUDA::cuda_driver
+        CUDA::cublas
+        CUDA::curand
+        CUDA::cufft
+    )
+    
+    # Compile options for multi-GPU
+    target_compile_options(libspinChainMultiGPU PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+            --extended-lambda
+            --generate-line-info
+            --use_fast_math
+            --relocatable-device-code=true
+            --maxrregcount=64
+            --ptxas-options=-v
+        >
+    )
+    
+    # Set properties for multi-GPU build
+    set_target_properties(libspinChainMultiGPU PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
+    
+    # Preprocessor definitions
+    target_compile_definitions(libspinChainMultiGPU PRIVATE
+        ENABLE_MULTIGPU=1
+        CUDA_VERSION=${CUDAToolkit_VERSION_MAJOR}${CUDAToolkit_VERSION_MINOR}
+    )
+    
+    # Build single-GPU version as well for comparison
+    pybind11_add_module(libspinChain ${SINGLE_GPU_SOURCES})
+    target_link_libraries(libspinChain PRIVATE CUDA::cudart CUDA::cufft)
+    target_compile_options(libspinChain PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+            --extended-lambda
+            --generate-line-info
+            --use_fast_math
+        >
+    )
+    set_target_properties(libspinChain PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+    
+else()
+    message(STATUS "Building with single-GPU support only")
+    
+    # Single-GPU Python extension
+    pybind11_add_module(libspinChain ${SINGLE_GPU_SOURCES})
+    target_link_libraries(libspinChain PRIVATE CUDA::cudart CUDA::cufft)
+    target_compile_options(libspinChain PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:
+            --extended-lambda
+            --generate-line-info
+            --use_fast_math
+        >
+    )
+    set_target_properties(libspinChain PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+endif()
+
+# Compiler-specific options
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(libspinChain PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+    )
+    if(ENABLE_MULTIGPU)
+        target_compile_options(libspinChainMultiGPU PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+        )
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(libspinChain PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+    )
+    if(ENABLE_MULTIGPU)
+        target_compile_options(libspinChainMultiGPU PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -O3>
+        )
+    endif()
+endif()
+
+# Installation rules
+if(ENABLE_MULTIGPU)
+    install(TARGETS libspinChainMultiGPU libspinChain
+            LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX})
+else()
+    install(TARGETS libspinChain
+            LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX})
+endif()
+
+# Create a configuration summary
+message(STATUS "=== Build Configuration Summary ===")
+message(STATUS "Multi-GPU support: ${ENABLE_MULTIGPU}")
+message(STATUS "CUDA Version: ${CUDAToolkit_VERSION}")
+message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "CUDA Standard: ${CMAKE_CUDA_STANDARD}")
+message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "pybind11 Version: ${pybind11_VERSION}")
+message(STATUS "===================================")
+
+# Optional: Create test executable for debugging
+option(BUILD_TESTS "Build test executables" OFF)
+if(BUILD_TESTS)
+    add_executable(multiGPUTest src/multiGPUTest.cpp ${MULTI_GPU_SOURCES})
+    target_link_libraries(multiGPUTest PRIVATE
+        CUDA::cudart
+        CUDA::cuda_driver
+        CUDA::cublas
+        CUDA::curand
+        CUDA::cufft
+    )
+    target_compile_definitions(multiGPUTest PRIVATE ENABLE_MULTIGPU=1)
+    set_target_properties(multiGPUTest PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+endif()
